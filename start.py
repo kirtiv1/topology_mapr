@@ -85,7 +85,7 @@ def main(args):
             node.volumes.extend(volumes)
 
     # MapR versions 6.0.0 onwards use CentOS 7 which needs following settings.
-    mapr_version_tuple = tuple([int(i) for i in args.mapr_version.split('.')])
+    mapr_version_tuple = tuple(int(i) for i in args.mapr_version.split('.'))
     if mapr_version_tuple >= EARLIEST_MAPR_VERSION_WITH_LICENSE_AND_CENTOS_7:
         for node in cluster.nodes:
             node.volumes.append({'/sys/fs/cgroup': '/sys/fs/cgroup'})

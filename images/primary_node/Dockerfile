@@ -27,7 +27,6 @@ RUN . /tmp/${REPO_URL_INSERT_SCRIPT} ${MAPR_VERSION} ${MEP_VERSION}
 RUN rpm --import http://package.mapr.com/releases/pub/maprgpg.key
 
 RUN yum -y install java-1.8.0-openjdk-devel \
-    openssl \
     mapr-cldb \
     mapr-core \
     mapr-fileserver \
@@ -47,7 +46,8 @@ RUN yum -y install java-1.8.0-openjdk-devel \
     mapr-spark \
     mapr-webserver \
     mapr-zookeeper \
-    mysql-server
+    mysql-server \
+    openssl
 
 # MapR script /opt/mapr/initscripts/mapr-warden sends core dump to a directory created by output of
 # $(cat /proc/sys/kernel/core_pattern). On a host with Ubuntu, the command produces output like
