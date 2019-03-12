@@ -28,6 +28,8 @@ RUN . /tmp/${REPO_URL_INSERT_SCRIPT} ${MAPR_VERSION} ${MEP_VERSION}
 RUN rpm --import http://package.mapr.com/releases/pub/maprgpg.key
 
 RUN yum -y install java-1.8.0-openjdk-devel \
+    krb5-libs \
+    krb5-workstation \
     mapr-core \
     mapr-fileserver \
     mapr-hbase-regionserver \

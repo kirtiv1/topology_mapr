@@ -30,6 +30,16 @@ start args:
     --dont-register-gateway:
         action: store_true
         help: If specified, do not register gateway with the cluster
+    --kerberos, -k:
+        action: store_true
+        help: If specified, enable Kerberos for the cluster
+    --kerberos-principals:
+        help: If specified, a comma-separated list of Kerberos user principals to create in KDC
+        metavar: princ1,princ2,...
+    --kerberos-ticket-lifetime:
+        default: 86400
+        help: If specified, the maximum time period in seconds for which a ticket may be valid in the realm
+        metavar: seconds
     --license-credentials:
         help: MapR license credentials to use in the format username:password
         metavar: credentials
