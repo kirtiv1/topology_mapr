@@ -20,19 +20,21 @@ from socket import getfqdn, socket
 from clusterdock.models import Cluster, Node
 from clusterdock.utils import wait_for_condition
 
+from . import kerberos_helper
+
 DEFAULT_NAMESPACE = 'clusterdock'
 EARLIEST_MAPR_VERSION_WITH_LICENSE_AND_CENTOS_7 = (6, 0, 0)
 MAPR_CONFIG_DIR = '/opt/mapr/conf'
 MAPR_SERVERTICKET_FILE = 'maprserverticket'
 MCS_SERVER_PORT = 8443
 SECURE_CONFIG_CONTAINER_DIR = '/etc/clusterdock/secure'
-SSL_KEYSTORE_FILE = 'ssl_keystore'
-SSL_TRUSTSTORE_FILE = 'ssl_truststore'
+SSL_KEYSTORE_FILES = 'ssl_keystore'
+SSL_TRUSTSTORE_FILES = 'ssl_truststore'
 
 SECURE_FILES = [
     MAPR_SERVERTICKET_FILE,
-    SSL_KEYSTORE_FILE,
-    SSL_TRUSTSTORE_FILE
+    SSL_KEYSTORE_FILES,
+    SSL_TRUSTSTORE_FILES
 ]
 
 
@@ -68,7 +70,7 @@ def main(args):
                         # Secure cluster needs the ticket to execute rest of commands
                         # after cluster start.
                         environment=['MAPR_TICKETFILE_LOCATION=/opt/mapr/conf/mapruserticket']
-                        if args.secure else [])
+                        if args.secure or args.kerberos else [])
 
     secondary_nodes = [Node(hostname=hostname,
                             group='secondary',
@@ -76,9 +78,21 @@ def main(args):
                             devices=node_disks.get(hostname))
                        for hostname in args.secondary_nodes]
 
-    cluster = Cluster(primary_node, *secondary_nodes)
+    nodes = [primary_node] + secondary_nodes
+    if args.kerberos:
+        logger.info('Creating KDC node...')
+        kdc = kerberos_helper.Kerberos_Helper(args.network, args.operating_system)
+        kerberos_config_host_dir = os.path.realpath(os.path.expanduser(args.clusterdock_config_directory))
+        volumes = [{kerberos_config_host_dir: kerberos_helper.KERBEROS_CONFIG_CONTAINER_DIR}]
+        for node in nodes:
+            node.volumes.extend(volumes)
 
-    if args.secure:
+        kdc_node = Node(hostname=kerberos_helper.KDC_HOSTNAME, group=kdc.kdc_group,
+                        image=kdc.kdc_image_name, volumes=volumes)
+
+    cluster = Cluster(*nodes + ([kdc_node] if args.kerberos else []))
+
+    if args.secure or args.kerberos:
         secure_config_host_dir = os.path.expanduser(args.secure_config_directory)
         volumes = [{secure_config_host_dir: SECURE_CONFIG_CONTAINER_DIR}]
         for node in cluster.nodes:
@@ -95,10 +109,19 @@ def main(args):
     cluster.primary_node = primary_node
     cluster.start(args.network, pull_images=args.always_pull)
 
+    # Keep track of whether to suppress DEBUG-level output in commands.
+    quiet = not args.verbose
+
+    if args.kerberos:
+        cluster.kdc_node = kdc_node
+        kdc.configure_kdc(kdc_node, nodes, args.kerberos_principals, args.kerberos_ticket_lifetime, quiet=quiet)
+        if args.kerberos_principals:
+            kerberos_helper.create_kerberos_cluster_users(nodes, args.kerberos_principals, quiet=quiet)
+
     logger.info('Generating new UUIDs ...')
     cluster.execute('/opt/mapr/server/mruuidgen > /opt/mapr/hostid')
 
-    if not args.secure:
+    if not (args.secure or args.kerberos):
         logger.info('Configuring the cluster ...')
         for node in cluster:
             configure_command = ('/opt/mapr/server/configure.sh -C {0} -Z {0} -RM {0} -HS {0} '
@@ -116,7 +139,7 @@ def main(args):
                              ))
         source_files = ['{}/{}'.format(MAPR_CONFIG_DIR, file) for file in SECURE_FILES]
         commands = [configure_command,
-                    'chmod 600 {}/{}'.format(MAPR_CONFIG_DIR, SSL_KEYSTORE_FILE),
+                    'chmod 600 {}/{}'.format(MAPR_CONFIG_DIR, SSL_KEYSTORE_FILES),
                     'cp -f {src} {dest_dir}'.format(src=' '.join(source_files),
                                                     dest_dir=SECURE_CONFIG_CONTAINER_DIR)]
         primary_node.execute(' && '.join(commands))
@@ -149,6 +172,15 @@ def main(args):
                        time_between_checks=3, timeout=180, success=success, failure=failure)
     mcs_server_host_port = primary_node.host_ports.get(MCS_SERVER_PORT)
 
+    _configure_after_mcs_server_start(primary_node, secondary_nodes, args, mapr_version_tuple,
+                                      kdc.mapr_principal if args.kerberos else None)
+
+    logger.info('MapR Control System server is now accessible at https://%s:%s',
+                getfqdn(), mcs_server_host_port)
+
+
+def _configure_after_mcs_server_start(primary_node, secondary_nodes, args,
+                                      mapr_version_tuple, mapr_principal=None):
     logger.info('Creating /apps/spark directory on %s ...', primary_node.hostname)
     spark_directory_command = ['hadoop fs -mkdir -p /apps/spark',
                                'hadoop fs -chmod 777 /apps/spark']
@@ -159,21 +191,59 @@ def main(args):
                          '-produceperm p -consumeperm p -topicperm p')
 
     if mapr_version_tuple >= EARLIEST_MAPR_VERSION_WITH_LICENSE_AND_CENTOS_7 and args.license_url:
-        license_commands = ['curl --user {} {} > /tmp/lic'.format(args.license_credentials,
-                                                                  args.license_url),
-                            '/opt/mapr/bin/maprcli license add -license /tmp/lic -is_file true',
-                            'rm -rf /tmp/lic']
-        logger.info('Applying license ...')
-        primary_node.execute(' && '.join(license_commands))
+        _apply_license(args, primary_node)
 
     if not args.dont_register_gateway:
-        logger.info('Registering gateway with the cluster ...')
-        register_gateway_commands = ["cat /opt/mapr/conf/mapr-clusters.conf | egrep -o '^[^ ]* '"
-                                     ' > /tmp/cluster-name',
-                                     'maprcli cluster gateway set -dstcluster $(cat '
-                                     '/tmp/cluster-name) -gateways {}'.format(primary_node.fqdn),
-                                     'rm /tmp/cluster-name']
-        primary_node.execute(' && '.join(register_gateway_commands))
+        _register_gateway(primary_node)
 
-    logger.info('MapR Control System server is now accessible at https://%s:%s',
-                getfqdn(), mcs_server_host_port)
+    if args.secure or args.kerberos:
+        primary_node.execute('echo mapr | sudo -u mapr maprlogin password')
+
+    if args.kerberos:
+        _kerberize_cluster(primary_node, secondary_nodes, mapr_principal)
+
+
+def _kerberize_cluster(primary_node, secondary_nodes, mapr_principal):
+    commands = ['service mapr-warden stop',
+                'service mapr-zookeeper stop',
+                ('/opt/mapr/server/configure.sh -K -P {0} -C {1} -Z {1} '
+                 .format(mapr_principal, primary_node.fqdn))]
+    primary_node.execute(' && '.join(commands))
+    for node in secondary_nodes:
+        node.execute(commands[2])
+
+    logger.info('After kerberization, waiting for MapR Control System server to come online ...')
+
+    def condition(address, port):
+        return socket().connect_ex((address, port)) == 0
+
+    def success(time):
+        logger.info('MapR Control System server is online after %s seconds.', time)
+
+    def failure(timeout):
+        raise TimeoutError('Timed out after {} seconds waiting '
+                           'for MapR Control System server to come online.'.format(timeout))
+    wait_for_condition(condition=condition,
+                       condition_args=[primary_node.ip_address, MCS_SERVER_PORT],
+                       time_between_checks=3, timeout=180, success=success, failure=failure)
+    primary_node.execute('kinit -kt {} {}'.format(kerberos_helper.MAPR_CONF_KEYTAB_FILEPATH, mapr_principal))
+    primary_node.execute('maprlogin kerberos')
+
+
+def _apply_license(args, primary_node):
+    license_commands = ['curl --user {} {} > /tmp/lic'.format(args.license_credentials,
+                                                              args.license_url),
+                        '/opt/mapr/bin/maprcli license add -license /tmp/lic -is_file true',
+                        'rm -rf /tmp/lic']
+    logger.info('Applying license ...')
+    primary_node.execute(' && '.join(license_commands))
+
+
+def _register_gateway(primary_node):
+    logger.info('Registering gateway with the cluster ...')
+    register_gateway_commands = ["cat /opt/mapr/conf/mapr-clusters.conf | egrep -o '^[^ ]* '"
+                                 ' > /tmp/cluster-name',
+                                 'maprcli cluster gateway set -dstcluster $(cat '
+                                 '/tmp/cluster-name) -gateways {}'.format(primary_node.fqdn),
+                                 'rm /tmp/cluster-name']
+    primary_node.execute(' && '.join(register_gateway_commands))
