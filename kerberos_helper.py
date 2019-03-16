@@ -16,8 +16,7 @@ import re
 
 from clusterdock.utils import wait_for_condition
 
-DEFAULT_OPERATING_SYSTEM = '6.6'
-IMAGE_NAME_TEMPLATE = 'clusterdock/topology_nodebase_kerberos:centos{}'
+KDC_IMAGE_NAME = 'clusterdock/topology_nodebase_kerberos:centos6.6'
 
 KERBEROS_CONFIG_CONTAINER_DIR = '/etc/clusterdock/kerberos'
 
@@ -42,15 +41,13 @@ logger = logging.getLogger('clusterdock.{}'.format(__name__))
 
 
 class Kerberos_Helper:
+    """Class to deal with kerberization of the cluster.
 
-    def __init__(self, network, operating_system):
-        self._kdc_image_name = IMAGE_NAME_TEMPLATE.format(operating_system or DEFAULT_OPERATING_SYSTEM)
-        self.kdc_group = KDC_GROUPNAME
+    Args:
+        network (:obj:`str`): Docker network to use.
+    """
+    def __init__(self, network):
         self.network = network
-
-    @property
-    def kdc_image_name(self):
-        return self._kdc_image_name
 
     @property
     def mapr_principal(self):
@@ -119,7 +116,7 @@ class Kerberos_Helper:
 
         kdc_node.execute(' && '.join(kdc_commands), quiet=quiet)
 
-        self._validate_service_health(kdc_node, ['krb5kdc', 'kadmin'], quiet=quiet)
+        _validate_service_health(kdc_node, ['krb5kdc', 'kadmin'], quiet=quiet)
 
         # nodes are the primary and secondary nodes.
         for node in nodes:
@@ -130,24 +127,24 @@ class Kerberos_Helper:
             commands.append('cp -f {}/{} {}'.format(KERBEROS_CONFIG_CONTAINER_DIR, 'krb5.conf', KRB5_CONF_FILEPATH))
             node.execute(' && '.join(commands), quiet=quiet)
 
-    def _validate_service_health(self, kdc_node, services, quiet=True):
-        logger.info('Validating health of Kerberos services ...')
+def _validate_service_health(kdc_node, services, quiet=True):
+    logger.info('Validating health of Kerberos services ...')
 
-        def condition(node, services, quiet):
-            services_with_poor_health = [service
-                                         for service in services
-                                         if node.execute(command='service {} status'.format(service),
-                                                         quiet=quiet).exit_code != 0]
-            if services_with_poor_health:
-                logger.debug('Services with poor health: %s',
-                             ', '.join(services_with_poor_health))
-            # Return True if the list of services with poor health is empty.
-            return not bool(services_with_poor_health)
-        wait_for_condition(condition=condition, condition_args=[kdc_node, services, quiet])
+    def condition(node, services, quiet):
+        services_with_poor_health = [service
+                                     for service in services
+                                     if node.execute(command='service {} status'.format(service),
+                                                     quiet=quiet).exit_code != 0]
+        if services_with_poor_health:
+            logger.debug('Services with poor health: %s',
+                         ', '.join(services_with_poor_health))
+        # Return True if the list of services with poor health is empty.
+        return not bool(services_with_poor_health)
+    wait_for_condition(condition=condition, condition_args=[kdc_node, services, quiet])
 
-    def create_kerberos_cluster_users(self, nodes, kerberos_principals, quiet):
-        commands = ['useradd -u {} -g hadoop {}'.format(uid, primary)
-                    for uid, primary in enumerate(kerberos_principals.split(','),
-                                                  start=LINUX_USER_ID_START)]
-        for node in nodes:
-            node.execute('; '.join(commands), quiet=quiet)
+def create_kerberos_cluster_users(nodes, kerberos_principals, quiet):
+    commands = ['useradd -u {} -g hadoop {}'.format(uid, primary)
+                for uid, primary in enumerate(kerberos_principals.split(','),
+                                              start=LINUX_USER_ID_START)]
+    for node in nodes:
+        node.execute('; '.join(commands), quiet=quiet)

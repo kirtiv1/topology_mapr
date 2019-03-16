@@ -81,14 +81,14 @@ def main(args):
     nodes = [primary_node] + secondary_nodes
     if args.kerberos:
         logger.info('Creating KDC node...')
-        kdc = kerberos_helper.Kerberos_Helper(args.network, args.operating_system)
+        kerberos_helper_instance = kerberos_helper.Kerberos_Helper(args.network)
         kerberos_config_host_dir = os.path.realpath(os.path.expanduser(args.clusterdock_config_directory))
         volumes = [{kerberos_config_host_dir: kerberos_helper.KERBEROS_CONFIG_CONTAINER_DIR}]
         for node in nodes:
             node.volumes.extend(volumes)
 
-        kdc_node = Node(hostname=kerberos_helper.KDC_HOSTNAME, group=kdc.kdc_group,
-                        image=kdc.kdc_image_name, volumes=volumes)
+        kdc_node = Node(hostname=kerberos_helper.KDC_HOSTNAME, group=kerberos_helper.KDC_GROUPNAME,
+                        image=kerberos_helper.KDC_IMAGE_NAME, volumes=volumes)
 
     cluster = Cluster(*nodes + ([kdc_node] if args.kerberos else []))
 
@@ -114,7 +114,10 @@ def main(args):
 
     if args.kerberos:
         cluster.kdc_node = kdc_node
-        kdc.configure_kdc(kdc_node, nodes, args.kerberos_principals, args.kerberos_ticket_lifetime, quiet=quiet)
+        kerberos_helper_instance.configure_kdc(kdc_node, nodes,
+                                               args.kerberos_principals,
+                                               args.kerberos_ticket_lifetime,
+                                               quiet=quiet)
         if args.kerberos_principals:
             kerberos_helper.create_kerberos_cluster_users(nodes, args.kerberos_principals, quiet=quiet)
 
@@ -173,7 +176,7 @@ def main(args):
     mcs_server_host_port = primary_node.host_ports.get(MCS_SERVER_PORT)
 
     _configure_after_mcs_server_start(primary_node, secondary_nodes, args, mapr_version_tuple,
-                                      kdc.mapr_principal if args.kerberos else None)
+                                      kerberos_helper_instance.mapr_principal if args.kerberos else None)
 
     logger.info('MapR Control System server is now accessible at https://%s:%s',
                 getfqdn(), mcs_server_host_port)

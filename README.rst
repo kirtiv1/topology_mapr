@@ -56,6 +56,12 @@ To see full usage instructions for the ``start`` action, use ``-h``/``--help``:
       -h, --help            show this help message and exit
     
     MapR arguments:
+      --kerberos            If specified, enable Kerberos for the cluster (default: False)
+      --kerberos-principals If specified, a comma-separated list of Kerberos user principals
+                            to create in KDC (default: None)
+      --kerberos-ticket-lifetime
+                            If specified, the maximum time period in seconds for which
+                            a ticket may be valid in the realm (default: 86400)
       --license-credentials credentials
                             MapR license credentials to use in the format
                             username:password (default: None)
